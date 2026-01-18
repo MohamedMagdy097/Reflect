@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  face-recognition-server:
+    build:
+      context: ./face-recognition-server
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      # Cache DeepFace models (arcface_weights.h5, retinaface.h5)
+      - deepface-cache:/root/.deepface
+      # Persist SQLite database
+      - ./face-recognition-server/data:/app/data
+    environment:
+      - DATABASE_URL=sqlite:///./data/database.db
+      - UPLOAD_DIR=uploads
+      - SIMILARITY_THRESHOLD=0.55
+    restart: unless-stopped
+
+  nextjs-app:
+    build:
+      context: ./nextjs-app
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://face-recognition-server:8000
+    depends_on:
+      - face-recognition-server
+    restart: unless-stopped
+
+volumes:
+  # Named volume for DeepFace model cache
+  # Models stored: arcface_weights.h5 (~137MB), retinaface.h5 (~119MB)
+  deepface-cache:

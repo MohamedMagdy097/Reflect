@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash([ -f package.json ])",
+      "Bash(venvScriptspip install -r requirements.txt)",
+      "Bash(npm init:*)"
+    ]
+  }
+}
