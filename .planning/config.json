@@ -1,0 +1,11 @@
+{
+  "project": "Reflect",
+  "mode": "YOLO",
+  "depth": "Standard",
+  "parallelization": "enabled",
+  "preferences": {
+    "approvalStyle": "auto-approve",
+    "phaseCount": "5-8",
+    "plansPerPhase": "3-5"
+  }
+}
