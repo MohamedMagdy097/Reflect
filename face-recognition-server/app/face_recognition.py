@@ -8,9 +8,9 @@ def init_model():
     try:
         # Force model download and initialization
         DeepFace.build_model("ArcFace")
-        print("✓ ArcFace model initialized successfully")
+        print("[+] ArcFace model initialized successfully")
     except Exception as e:
-        print(f"✗ Failed to initialize ArcFace model: {e}")
+        print(f"[-] Failed to initialize ArcFace model: {e}")
         raise
 
 

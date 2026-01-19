@@ -14,21 +14,21 @@ os.makedirs("uploads", exist_ok=True)
 async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
     # Startup
-    print("🚀 Starting Face Recognition Server...")
+    print("[*] Starting Face Recognition Server...")
 
     # Initialize database
     Base.metadata.create_all(bind=engine)
-    print("✓ Database initialized")
+    print("[+] Database initialized")
 
     # Pre-load face recognition model
     init_model()
 
-    print("✓ Server ready!")
+    print("[+] Server ready!")
 
     yield
 
     # Shutdown
-    print("🛑 Shutting down...")
+    print("[*] Shutting down...")
 
 
 app = FastAPI(

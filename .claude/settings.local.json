@@ -3,7 +3,11 @@
     "allow": [
       "Bash([ -f package.json ])",
       "Bash(venvScriptspip install -r requirements.txt)",
-      "Bash(npm init:*)"
+      "Bash(npm init:*)",
+      "Skill(gsd:plan-phase)",
+      "Skill(gsd:plan-phase:*)",
+      "Skill(gsd:new-project)",
+      "Skill(gsd:new-project:*)"
     ]
   }
 }

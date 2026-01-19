@@ -8,14 +8,16 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # Cache DeepFace models (arcface_weights.h5, retinaface.h5)
-      - deepface-cache:/root/.deepface
+      # Cache DeepFace models (arcface_weights.h5 ~137MB, retinaface.h5 ~119MB)
+      # Uses DEEPFACE_HOME env var set in Dockerfile
+      - deepface-cache:/app/.deepface
       # Persist SQLite database
       - ./face-recognition-server/data:/app/data
     environment:
       - DATABASE_URL=sqlite:///./data/database.db
       - UPLOAD_DIR=uploads
       - SIMILARITY_THRESHOLD=0.55
+      - DEEPFACE_HOME=/app/.deepface
     restart: unless-stopped
 
   nextjs-app:

@@ -27,13 +27,16 @@ COPY app/ ./app/
 RUN mkdir -p uploads
 
 # Create deepface cache directory (will be mounted as volume)
-RUN mkdir -p /root/.deepface/weights
+# DeepFace uses DEEPFACE_HOME env var, or falls back to ~/.deepface
+RUN mkdir -p /app/.deepface/weights
 
 # Environment variables
 ENV PYTHONUNBUFFERED=1
 ENV DATABASE_URL=sqlite:///./database.db
 ENV UPLOAD_DIR=uploads
 ENV SIMILARITY_THRESHOLD=0.55
+# Set explicit DeepFace cache location (easier to mount as volume)
+ENV DEEPFACE_HOME=/app/.deepface
 
 # Expose port
 EXPOSE 8000
