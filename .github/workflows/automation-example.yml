@@ -1,0 +1,286 @@
+name: Reflect CD Pipeline (Alpha - AWS EC2)
+
+on:
+  push:
+    branches: [alpha]
+
+jobs:
+  deploy:
+    name: Deploy Reflect to Alpha (AWS EC2)
+    runs-on: ubuntu-latest
+    environment: alpha  # Use alpha environment secrets
+
+    steps:
+    - name: Checkout Reflect Repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 2  # Required for git diff HEAD~1 HEAD
+
+    - name: Configure AWS EC2 SSH Connection
+      uses: webfactory/ssh-agent@v0.9.0
+      with:
+        ssh-private-key: ${{ secrets.EC2_SSH_KEY }}
+
+    - name: Register EC2 Host to Known Hosts
+      run: |
+        mkdir -p ~/.ssh
+        ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+    - name: Prepare Reflect Environment Files
+      run: |
+        echo "${{ secrets.ADMIN_ENV }}" > ./admin/.env
+        echo "${{ secrets.ELYSIA_SERVER_ENV }}" > ./elysia-server/.env
+
+    - name: Detect Changed Components
+      id: changes
+      run: |
+        # Get list of changed files compared to previous commit
+        CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || git diff --name-only HEAD)
+        echo "Changed files:"
+        echo "$CHANGED_FILES"
+
+        # Worker-specific files that require worker restart
+        WORKER_PATTERNS=(
+          "elysia-server/src/worker.ts"
+          "elysia-server/src/workers/"
+          "elysia-server/Dockerfile.worker"
+          "elysia-server/src/lib/queue/"
+          "elysia-server/src/lib/redis/"
+          "elysia-server/src/lib/health.ts"
+          "elysia-server/package.json"
+          "elysia-server/bun.lockb"
+          # Services directly imported by Worker
+          "elysia-server/src/services/followup-email.service.ts"
+          "elysia-server/src/services/email.service.ts"
+          "elysia-server/src/services/hunterio-domain-search.service.ts"
+          "elysia-server/src/services/hunterio-email-verifier.service.ts"
+          "elysia-server/src/services/job-log.service.ts"
+          "elysia-server/src/services/lead-enrichment.service.ts"
+          "elysia-server/src/services/lead.service.ts"
+          "elysia-server/src/services/onboarding-worker.service.ts"
+          "elysia-server/src/services/loops.service.ts"
+          "elysia-server/src/services/sequence.service.ts"
+          "elysia-server/src/services/unipile.service.ts"
+          "elysia-server/src/services/workflow-email.service.ts"
+          "elysia-server/src/services/workflow-execution.service.ts"
+        )
+
+        # Check if any worker-related files changed
+        WORKER_CHANGED="false"
+        for pattern in "${WORKER_PATTERNS[@]}"; do
+          if echo "$CHANGED_FILES" | grep -q "$pattern"; then
+            WORKER_CHANGED="true"
+            echo "Worker file changed: $pattern"
+            break
+          fi
+        done
+
+        # Check if API/Admin files changed
+        API_CHANGED="false"
+        if echo "$CHANGED_FILES" | grep -qE "^elysia-server/"; then
+          API_CHANGED="true"
+        fi
+
+        ADMIN_CHANGED="false"
+        if echo "$CHANGED_FILES" | grep -qE "^admin/"; then
+          ADMIN_CHANGED="true"
+        fi
+
+        echo "worker_changed=$WORKER_CHANGED" >> $GITHUB_OUTPUT
+        echo "api_changed=$API_CHANGED" >> $GITHUB_OUTPUT
+        echo "admin_changed=$ADMIN_CHANGED" >> $GITHUB_OUTPUT
+
+        echo ""
+        echo "[+] Change Detection Results:"
+        echo "    - Worker changed: $WORKER_CHANGED"
+        echo "    - API changed: $API_CHANGED"
+        echo "    - Admin changed: $ADMIN_CHANGED"
+
+    - name: Deploy Reflect to EC2 via Rsync
+      run: |
+        echo "[+] Creating deployment directory on EC2"
+        ssh ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }} "mkdir -p ~/send-grid-test"
+
+        echo "[+] Syncing Reflect files to EC2"
+        rsync -avz --delete \
+          --exclude='.git/' \
+          --exclude='node_modules/' \
+          --exclude='dist/' \
+          --exclude='.next/' \
+          --exclude='.turbo/' \
+          --exclude='*.log' \
+          --exclude='.DS_Store' \
+          ./ ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}:~/send-grid-test/
+
+    - name: Pre-deployment Database Backup
+      run: |
+        ssh ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }} << 'EOF'
+          set -e
+          echo "[+] Creating pre-deployment database backup..."
+
+          BACKUP_DIR="$HOME/backups/postgres/pre-deploy"
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          BACKUP_FILE="${BACKUP_DIR}/postgres_pre-deploy_${TIMESTAMP}.dump"
+          MAX_BACKUPS=20
+
+          mkdir -p "${BACKUP_DIR}"
+
+          # Check if postgres container is running (not just exists)
+          POSTGRES_RUNNING=$(docker inspect --format='{{.State.Running}}' send-grid-test-postgres-1 2>/dev/null || echo "false")
+
+          if [ "$POSTGRES_RUNNING" = "true" ]; then
+            LATEST=$(find "${BACKUP_DIR}" -name "*.dump" -mmin -30 2>/dev/null | head -1)
+            if [ -n "${LATEST}" ]; then
+              echo "[+] Recent backup exists (< 30min), skipping: $(basename ${LATEST})"
+            else
+              docker exec send-grid-test-postgres-1 pg_dump -U postgres -d postgres \
+                --format=custom --compress=6 --no-owner --no-privileges \
+                --file=/tmp/backup.dump
+
+              docker cp send-grid-test-postgres-1:/tmp/backup.dump "${BACKUP_FILE}"
+              docker exec send-grid-test-postgres-1 rm -f /tmp/backup.dump
+
+              SIZE=$(du -h "${BACKUP_FILE}" | cut -f1)
+              echo "[+] Pre-deploy backup created: ${BACKUP_FILE} (${SIZE})"
+            fi
+
+            cd "${BACKUP_DIR}"
+            ls -t *.dump 2>/dev/null | tail -n +$((MAX_BACKUPS + 1)) | xargs -r rm -f
+            CURRENT_COUNT=$(ls -1 *.dump 2>/dev/null | wc -l)
+            echo "[+] Pre-deploy backups: ${CURRENT_COUNT}/${MAX_BACKUPS}"
+          else
+            echo "[!] PostgreSQL container not running, skipping backup"
+          fi
+        EOF
+
+    - name: Build and Deploy Reflect with Docker Compose (Alpha)
+      env:
+        WORKER_CHANGED: ${{ steps.changes.outputs.worker_changed }}
+      run: |
+        ssh ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }} bash -s -- "$WORKER_CHANGED" << 'DEPLOY_EOF'
+          WORKER_CHANGED="$1"
+          set -e
+          set -o pipefail
+
+          cd ~/send-grid-test
+
+          # Alpha uses docker-compose.alpha.yml
+          COMPOSE_CMD="docker compose -f docker-compose.alpha.yml"
+
+          echo "[+] Backing up current containers for rollback"
+          $COMPOSE_CMD ps -q > /tmp/previous_containers.txt 2>/dev/null || true
+
+          # Check if this is first deployment (no running containers)
+          RUNNING_CONTAINERS=$($COMPOSE_CMD ps -q 2>/dev/null | wc -l || echo "0")
+          FIRST_DEPLOY="false"
+          if [ "$RUNNING_CONTAINERS" -eq 0 ]; then
+            FIRST_DEPLOY="true"
+          fi
+
+          echo ""
+          echo "[+] Deployment Strategy (Alpha)"
+          echo "    - First deployment: $FIRST_DEPLOY"
+          echo "    - Worker code changed: $WORKER_CHANGED"
+
+          if [ "$FIRST_DEPLOY" = "true" ] || [ "$WORKER_CHANGED" = "true" ]; then
+            echo ""
+            echo "[+] Building ALL Docker images"
+            $COMPOSE_CMD build --pull
+
+            echo "[+] Deploying ALL containers"
+            $COMPOSE_CMD up -d --remove-orphans
+          else
+            echo ""
+            echo "[+] Building API/Admin images only (worker unchanged)"
+            $COMPOSE_CMD build --pull elysia-server admin
+
+            echo "[+] Deploying API/Admin containers only (preserving worker)"
+            WORKER_CONTAINER_ID=$(docker ps -q -f name=send-grid-test-bullmq-worker-1 2>/dev/null || true)
+
+            $COMPOSE_CMD up -d --no-deps elysia-server admin nginx
+
+            NEW_WORKER_CONTAINER_ID=$(docker ps -q -f name=send-grid-test-bullmq-worker-1 2>/dev/null || true)
+            if [ -n "$WORKER_CONTAINER_ID" ] && [ "$WORKER_CONTAINER_ID" = "$NEW_WORKER_CONTAINER_ID" ]; then
+              echo "[+] Worker preserved (Container ID: $WORKER_CONTAINER_ID)"
+            else
+              echo "[!] Worker was restarted (Old: $WORKER_CONTAINER_ID, New: $NEW_WORKER_CONTAINER_ID)"
+            fi
+          fi
+
+          echo "[+] Running health checks (timeout: 90s)"
+          HEALTH_CHECK_TIMEOUT=90
+          HEALTH_CHECK_INTERVAL=5
+          ELAPSED=0
+
+          while [ $ELAPSED -lt $HEALTH_CHECK_TIMEOUT ]; do
+            # Check via nginx (port 80) - Alpha doesn't use SSL
+            NGINX_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/health || echo "000")
+            ADMIN_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health || echo "000")
+            ELYSIA_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3001/health || echo "000")
+
+            # Check bullmq-worker container health via Docker
+            WORKER_HEALTH=$(docker inspect --format='{{.State.Health.Status}}' send-grid-test-bullmq-worker-1 2>/dev/null || echo "unknown")
+            WORKER_RUNNING=$(docker inspect --format='{{.State.Running}}' send-grid-test-bullmq-worker-1 2>/dev/null || echo "false")
+
+            if [ "$ADMIN_STATUS" = "200" ] && [ "$ELYSIA_STATUS" = "200" ] && [ "$WORKER_RUNNING" = "true" ]; then
+              if [ "$WORKER_HEALTH" = "healthy" ] || [ "$WORKER_HEALTH" = "starting" ]; then
+                echo " => Health check passed: All services are healthy (Nginx: $NGINX_STATUS, Worker: $WORKER_HEALTH)"
+                break
+              fi
+            fi
+
+            echo " => Waiting for services (Nginx: $NGINX_STATUS, Admin: $ADMIN_STATUS, Elysia: $ELYSIA_STATUS, Worker: $WORKER_RUNNING/$WORKER_HEALTH) [$ELAPSED/$HEALTH_CHECK_TIMEOUT s]"
+            sleep $HEALTH_CHECK_INTERVAL
+            ELAPSED=$((ELAPSED + HEALTH_CHECK_INTERVAL))
+          done
+
+          if [ $ELAPSED -ge $HEALTH_CHECK_TIMEOUT ]; then
+            echo "[!] Health check failed - Rolling back deployment"
+            echo "[!] Final status - Admin: $ADMIN_STATUS, Elysia: $ELYSIA_STATUS, Worker: $WORKER_RUNNING/$WORKER_HEALTH"
+            $COMPOSE_CMD logs --tail=50 bullmq-worker
+            $COMPOSE_CMD down
+            if [ -f /tmp/previous_containers.txt ]; then
+              echo "[+] Restoring previous containers"
+              $COMPOSE_CMD up -d --no-build
+            fi
+            exit 1
+          fi
+
+          echo "[+] Cleaning up unused Docker images"
+          docker image prune -f
+
+          echo ""
+          echo "[+] Reloading Nginx"
+          docker exec send-grid-test-nginx-1 nginx -s reload 2>/dev/null || true
+          sleep 2
+
+          echo ""
+          echo "[+] Reflect Alpha Container Status:"
+          $COMPOSE_CMD ps
+
+          echo ""
+          echo "[+] Reflect Alpha Service Logs (last 10 lines):"
+          $COMPOSE_CMD logs --tail=10
+        DEPLOY_EOF
+
+    - name: Verify Reflect Alpha Deployment
+      run: |
+        echo "[+] Verifying Reflect Alpha deployment (via HTTPS)"
+        sleep 5
+
+        # Health check via HTTPS (Cloudflare + Origin SSL)
+        NGINX_CHECK=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 https://alpha.Reflect.ai/health || echo "000")
+        API_CHECK=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 https://alpha.Reflect.ai/api/health || echo "000")
+
+        if [ "$NGINX_CHECK" != "200" ] || [ "$API_CHECK" != "200" ]; then
+          echo "[!] Deployment verification failed"
+          echo " => Nginx health (/health): $NGINX_CHECK (expected: 200)"
+          echo " => API health (/api/health): $API_CHECK (expected: 200)"
+          exit 1
+        fi
+
+        echo "[+] Alpha deployment verified successfully"
+        echo " => Nginx health (/health): $NGINX_CHECK"
+        echo " => API health (/api/health): $API_CHECK"
+        echo ""
+        echo "[+] Reflect Alpha is now live at https://alpha.Reflect.ai"

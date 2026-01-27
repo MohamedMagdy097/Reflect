@@ -7,7 +7,12 @@
       "Skill(gsd:plan-phase)",
       "Skill(gsd:plan-phase:*)",
       "Skill(gsd:new-project)",
-      "Skill(gsd:new-project:*)"
+      "Skill(gsd:new-project:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(ls -la \"d:\\\\work\\\\Reflect\\\\.planning\\\\research\"\" 2>/dev/null || echo \"Directory may not exist yet \")",
+      "Bash(wc:*)",
+      "Bash(powershell -Command:*)"
     ]
   }
 }
